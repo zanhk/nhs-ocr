@@ -1,0 +1,27 @@
+{
+  "name": "nhs-ocr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail",
+    "db:gen": "drizzle-kit generate",
+    "db:apply:local": "wrangler d1 migrations apply nhs-ocr --local",
+    "db:apply:remote": "wrangler d1 migrations apply nhs-ocr --remote",
+    "db:studio": "drizzle-kit studio",
+    "tg:set-webhook": "node scripts/set-telegram-webhook.mjs",
+    "tg:set-commands": "node scripts/set-telegram-commands.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "drizzle-kit": "^0.28.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.36.0"
+  }
+}

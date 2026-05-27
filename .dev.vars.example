@@ -1,0 +1,6 @@
+# Copy this file to .dev.vars and fill in the values for local development.
+# Production secrets are set via `wrangler secret put <NAME>`.
+
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+GEMINI_API_KEY=

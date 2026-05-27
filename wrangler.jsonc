@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nhs-ocr",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "account_id": "44427ecfac500af8d99bcbedb5f9e76a",
+
+  "vars": {
+    // Comma-separated list of Telegram chat IDs allowed to use the bot.
+    // Group chats are negative numbers (e.g. -1001234567890).
+    "TELEGRAM_ALLOWED_CHAT_IDS": "-5118955514"
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nhs-ocr",
+      // Filled in after `wrangler d1 create nhs-ocr`.
+      "database_id": "465af5d2-8edc-44c0-9a5b-1b85276e7069",
+      "migrations_dir": "drizzle"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "DOCS",
+      "bucket_name": "nhs-ocr-docs"
+    }
+  ],
+
+  "workflows": [
+    {
+      "name": "extract-document",
+      "binding": "EXTRACT_WORKFLOW",
+      "class_name": "ExtractDocumentWorkflow"
+    }
+  ]
+}
