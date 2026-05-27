@@ -20,6 +20,7 @@ export interface TokenUsage {
 }
 
 export interface ExtractResult {
+  totalPagesInFile: number;
   extractions: TR1Extracted[];
   raw: unknown;
   usage: TokenUsage;
@@ -50,9 +51,19 @@ const KEY_TYPO_FIXES: Record<string, string> = {
 
 function bytesToBase64(bytes: ArrayBuffer): string {
   const u8 = new Uint8Array(bytes);
-  let s = "";
-  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
-  return btoa(s);
+  // 32 KB chunks: keeps below String.fromCharCode's argument-count limit and
+  // avoids holding a multi-megabyte JS string during quadratic concat.
+  const CHUNK = 0x8000;
+  const chunks: string[] = [];
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    chunks.push(
+      String.fromCharCode.apply(
+        null,
+        u8.subarray(i, i + CHUNK) as unknown as number[],
+      ),
+    );
+  }
+  return btoa(chunks.join(""));
 }
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
@@ -86,14 +97,22 @@ function healFieldObject(
   return healed;
 }
 
-function validateAndHeal(
-  parsed: unknown,
-): { extractions: TR1Extracted[]; healingLog: string[] } {
+function validateAndHeal(parsed: unknown): {
+  totalPagesInFile: number;
+  extractions: TR1Extracted[];
+  healingLog: string[];
+} {
   if (!isPlainObject(parsed)) {
     throw new Error(
       `gemini did not return an object. Got: ${typeof parsed}`,
     );
   }
+  const totalPagesRaw = (parsed as { total_pages_in_file?: unknown }).total_pages_in_file;
+  const totalPagesInFile =
+    typeof totalPagesRaw === "number" && Number.isFinite(totalPagesRaw)
+      ? Math.max(0, Math.trunc(totalPagesRaw))
+      : 0;
+
   const arr = (parsed as { extractions?: unknown }).extractions;
   if (!Array.isArray(arr)) {
     throw new Error(
@@ -128,7 +147,25 @@ function validateAndHeal(
     out.push(healedExtraction as unknown as TR1Extracted);
   });
 
-  return { extractions: out, healingLog };
+  // Soft sanity check: if Gemini reports way more pages than the deepest
+  // source_page, it probably skipped pages near the end. Log a warning so we
+  // see it in `wrangler tail`. We don't fail — the user still gets results,
+  // but the warning gives us a signal for tuning.
+  if (totalPagesInFile > 0 && out.length > 0) {
+    const maxSourcePage = out.reduce((m, ex) => {
+      const localMax = Math.max(
+        ...TR1_FIELD_NAMES.map((n) => ex[n]?.source_page ?? 0),
+      );
+      return Math.max(m, localMax);
+    }, 0);
+    if (maxSourcePage < totalPagesInFile - 5) {
+      console.warn(
+        `gemini coverage suspect: total_pages_in_file=${totalPagesInFile} but deepest source_page=${maxSourcePage}. Possible partial scan.`,
+      );
+    }
+  }
+
+  return { totalPagesInFile, extractions: out, healingLog };
 }
 
 export async function extractTR1(
@@ -199,7 +236,7 @@ export async function extractTR1(
     );
   }
 
-  const { extractions, healingLog } = validateAndHeal(parsedRaw);
+  const { totalPagesInFile, extractions, healingLog } = validateAndHeal(parsedRaw);
 
   if (healingLog.length > 0) {
     console.warn(`gemini schema healing applied (${healingLog.length}): ${healingLog.join("; ")}`);
@@ -207,9 +244,13 @@ export async function extractTR1(
 
   if (extractions.length === 0) {
     throw new Error(
-      "no TR1 forms detected in this file — make sure you uploaded a UK Land Registry TR1 document",
+      `no TR1 forms detected in this file (gemini reported ${totalPagesInFile} pages). Make sure you uploaded a UK Land Registry TR1 document.`,
     );
   }
+
+  console.log(
+    `gemini extracted ${extractions.length} TR1(s) from ${totalPagesInFile}-page file`,
+  );
 
   const usage: TokenUsage = {
     input: json.usageMetadata?.promptTokenCount ?? 0,
@@ -218,6 +259,7 @@ export async function extractTR1(
   };
 
   return {
+    totalPagesInFile,
     extractions,
     raw: json,
     usage,

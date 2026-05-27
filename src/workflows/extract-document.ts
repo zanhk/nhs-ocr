@@ -30,7 +30,9 @@ const FIELD_VALUE_TRUNCATE = 100;
 
 const HEAVY_STEP: WorkflowStepConfig = {
   retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
-  timeout: "5 minutes",
+  // 15 min: covers worst-case 100-page multi-doc PDFs with 50+ TR1s, where
+  // Gemini output generation alone can take several minutes.
+  timeout: "15 minutes",
 };
 
 const LIGHT_STEP: WorkflowStepConfig = {
@@ -107,7 +109,11 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
         })
         .where(eq(documents.id, documentId));
 
-      return { ok: true as const };
+      return {
+        ok: true as const,
+        totalPagesInFile: result.totalPagesInFile,
+        extractionCount: result.extractions.length,
+      };
     });
 
     const enrichedList: TR1EnrichedList = await step.do(
@@ -126,9 +132,13 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
         if (!text) {
           throw new Error("raw_gemini_response missing candidate text on persist replay");
         }
-        const parsed = JSON.parse(text) as { extractions: TR1Extracted[] };
+        const parsed = JSON.parse(text) as {
+          total_pages_in_file?: number;
+          extractions: TR1Extracted[];
+        };
         const enriched = enrichTR1List(parsed.extractions);
         const payload: TR1EnrichedList = {
+          total_pages_in_file: parsed.total_pages_in_file ?? 0,
           extraction_count: enriched.length,
           extractions: enriched,
         };
@@ -208,6 +218,12 @@ function buildSummary(
     0,
   );
 
+  const formsText = n === 1 ? "1 TR1 form" : `${n} TR1 forms`;
+  const pagesText =
+    list.total_pages_in_file > 0
+      ? `📊 Scanned ${list.total_pages_in_file} page(s), found ${formsText}`
+      : `📊 Found ${formsText}`;
+
   const header = n === 1
     ? "✅ <b>Extraction complete</b>"
     : `✅ <b>Extraction complete — ${n} TR1 forms found</b>`;
@@ -234,7 +250,7 @@ function buildSummary(
     "Full JSON attached below.",
   ].join("\n");
 
-  return [header, "", ...blocks, footer].join("\n");
+  return [header, pagesText, "", ...blocks, footer].join("\n");
 }
 
 function renderOneTr1Full(

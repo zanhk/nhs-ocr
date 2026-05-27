@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = "v2";
+export const PROMPT_VERSION = "v3";
 
 export const TR1_FIELD_NAMES = [
   "title_number",
@@ -49,10 +49,12 @@ export type TR1Extracted = Record<TR1FieldName, TR1FieldExtracted>;
 export type TR1Enriched = Record<TR1FieldName, TR1FieldEnriched>;
 
 export interface TR1ExtractedList {
+  total_pages_in_file: number;
   extractions: TR1Extracted[];
 }
 
 export interface TR1EnrichedList {
+  total_pages_in_file: number;
   extraction_count: number;
   extractions: TR1Enriched[];
 }
@@ -196,19 +198,30 @@ const SINGLE_TR1_SCHEMA = {
 export const TR1_RESPONSE_SCHEMA = {
   type: "OBJECT",
   properties: {
+    total_pages_in_file: {
+      type: "INTEGER",
+      description:
+        "Total number of pages in the WHOLE input file as you can see it. Count every page including blank pages and pages not part of any TR1.",
+    },
     extractions: {
       type: "ARRAY",
       description:
-        "One entry per TR1 form detected in the input. Empty array if no TR1 is present.",
+        "One entry per TR1 form detected in the input, in document order. Empty array if no TR1 is present.",
       items: SINGLE_TR1_SCHEMA,
     },
   },
-  required: ["extractions"],
+  required: ["total_pages_in_file", "extractions"],
 };
 
 export const TR1_PROMPT = `You are extracting structured data from a UK Land Registry document. The input file may contain ONE OR MORE Form TR1 (Transfer of Whole of Registered Title(s)) documents concatenated together. It may be a scanned PDF or photograph and may contain handwritten signatures, names, addresses, and ticked boxes.
 
-Return JSON of the form { "extractions": [ <one object per TR1> ] }. If multiple TR1s appear in the same file (typical for bulk uploads where each TR1 is 4–6 pages), emit one extraction object per form, in the order they appear. If no TR1 is present at all, return { "extractions": [] }.
+CRITICAL — PAGE COVERAGE:
+- You MUST scan EVERY PAGE of the input file from page 1 to the last page. Do not stop early. Do not skip pages.
+- Bulk submissions commonly contain 5, 10, 50 or more TR1 forms back-to-back. A TR1 is typically 4–6 pages.
+- Before listing extractions, set total_pages_in_file to the total number of pages in the whole file (every page, blank or otherwise). This is a sanity-check value — if you see 80 pages, report 80.
+- Then emit one extraction per TR1 form found, in document order. If two TR1s share a page or boundaries are unclear, do your best to separate them and note it in that TR1's comments.
+
+Return JSON of the form { "total_pages_in_file": N, "extractions": [ <one object per TR1> ] }. If no TR1 is present at all, return { "total_pages_in_file": N, "extractions": [] }.
 
 For EVERY field listed below, return an object with these keys:
 - field_name: the exact field key (e.g. "title_number")
@@ -231,5 +244,6 @@ Rules:
 5. The comments field is for the EXTRACTOR's notes about THIS specific TR1 (e.g. "TR1 #2 of 3 in the file", "panel 11 cut off"). When the file contains multiple TR1s, identify which one this is (e.g. "Form 1 of N, pages X–Y").
 6. source_page is the 1-indexed page number within the WHOLE FILE (not within an individual TR1). So if TR1 #2 starts on page 6, its title_number.source_page is 6.
 7. Use EXACTLY these keys on each field object — never abbreviate or typo them. Specifically the value key is spelled "value" (not "vaue", not "val").
+8. After emitting the JSON, mentally verify: does the highest source_page across all extractions come close to total_pages_in_file? If not, you probably skipped pages — re-scan the tail of the document before answering.
 
 Return ONLY the JSON object matching the schema. No prose, no markdown, no preamble.`;
