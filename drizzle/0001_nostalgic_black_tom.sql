@@ -1,0 +1,1 @@
+ALTER TABLE `documents` ADD `extraction_count` integer;

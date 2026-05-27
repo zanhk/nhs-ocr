@@ -6,7 +6,7 @@ import type {
   TR1FieldName,
 } from "./tr1-schema.ts";
 
-export const REVIEW_RULES_VERSION = "v1";
+export const REVIEW_RULES_VERSION = "v2";
 
 const CONFIDENCE_FLOOR = 0.7;
 
@@ -23,6 +23,12 @@ const HANDWRITING_SENSITIVE: TR1FieldName[] = [
   "execution_signature_of_witness_to_transferor",
   "execution_name_of_witness_to_transferor",
   "execution_address_of_witness_to_transferor",
+];
+
+const TRUST_FIELDS: TR1FieldName[] = [
+  "declaration_of_trust_joint_tenants",
+  "declaration_of_trust_tenants_in_common",
+  "declaration_of_trust_other",
 ];
 
 function deriveOne(
@@ -53,6 +59,17 @@ function deriveOne(
   return { ...f, requires_human_review: review };
 }
 
+function looksLikeMultipleTransferees(value: string | null): boolean {
+  if (!value) return false;
+  // Common joiners: " and ", " & ", comma-separated names
+  if (/ and /i.test(value)) return true;
+  if (/ & /.test(value)) return true;
+  // crude comma test: two or more commas usually means a list of people
+  const commaCount = (value.match(/,/g) ?? []).length;
+  if (commaCount >= 2) return true;
+  return false;
+}
+
 export function enrichTR1(extracted: TR1Extracted): TR1Enriched {
   const hasConsideration =
     extracted.consideration_money.value !== null ||
@@ -62,5 +79,29 @@ export function enrichTR1(extracted: TR1Extracted): TR1Enriched {
   for (const name of Object.keys(extracted) as TR1FieldName[]) {
     out[name] = deriveOne(name, extracted[name], hasConsideration);
   }
+
+  // Cross-field rule: a multi-transferee TR1 with NO trust declaration ticked
+  // will trigger a Form A restriction by default at HM Land Registry. Flag for
+  // human review so the operator confirms this is intentional.
+  if (looksLikeMultipleTransferees(out.transferee_for_entry_in_register.value)) {
+    const allTrustNull = TRUST_FIELDS.every((n) => out[n].value === null);
+    if (allTrustNull) {
+      for (const n of TRUST_FIELDS) {
+        out[n].requires_human_review = true;
+        out[n].ambiguity_reason =
+          out[n].ambiguity_reason ??
+          "multi-transferee TR1 with no trust declaration ticked — Form A restriction will be imposed by default";
+      }
+    }
+  }
+
   return out;
+}
+
+export function enrichTR1List(extractions: TR1Extracted[]): TR1Enriched[] {
+  return extractions.map(enrichTR1);
+}
+
+export function countReviewFields(enriched: TR1Enriched): number {
+  return Object.values(enriched).filter((f) => f.requires_human_review).length;
 }

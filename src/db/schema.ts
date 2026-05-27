@@ -37,6 +37,7 @@ export const documents = sqliteTable(
     tokenUsage: text("token_usage", { mode: "json" }),
 
     attemptCount: integer("attempt_count").notNull().default(0),
+    extractionCount: integer("extraction_count"),
     errorMessage: text("error_message"),
 
     summarySentAt: integer("summary_sent_at"),

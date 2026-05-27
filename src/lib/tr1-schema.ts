@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = "v1";
+export const PROMPT_VERSION = "v2";
 
 export const TR1_FIELD_NAMES = [
   "title_number",
@@ -47,6 +47,30 @@ export interface TR1FieldEnriched extends TR1FieldExtracted {
 
 export type TR1Extracted = Record<TR1FieldName, TR1FieldExtracted>;
 export type TR1Enriched = Record<TR1FieldName, TR1FieldEnriched>;
+
+export interface TR1ExtractedList {
+  extractions: TR1Extracted[];
+}
+
+export interface TR1EnrichedList {
+  extraction_count: number;
+  extractions: TR1Enriched[];
+}
+
+export const TR1_FIELD_REQUIRED_KEYS = [
+  "field_name",
+  "value",
+  "data_type",
+  "source_page",
+  "source_section",
+  "confidence_score",
+  "is_handwritten",
+] as const;
+
+export const TR1_FIELD_ALL_KEYS = [
+  ...TR1_FIELD_REQUIRED_KEYS,
+  "ambiguity_reason",
+] as const;
 
 const FIELD_HINTS: Record<TR1FieldName, { dataType: TR1DataType; hint: string }> = {
   title_number: {
@@ -160,7 +184,7 @@ const fieldSchema = (dataType: TR1DataType) => ({
   description: `Expected data_type: ${dataType}`,
 });
 
-export const TR1_RESPONSE_SCHEMA = {
+const SINGLE_TR1_SCHEMA = {
   type: "OBJECT",
   properties: Object.fromEntries(
     TR1_FIELD_NAMES.map((name) => [name, fieldSchema(FIELD_HINTS[name].dataType)]),
@@ -169,7 +193,22 @@ export const TR1_RESPONSE_SCHEMA = {
   propertyOrdering: [...TR1_FIELD_NAMES],
 };
 
-export const TR1_PROMPT = `You are extracting structured data from a UK Land Registry Form TR1 (Transfer of Whole of Registered Title(s)). The document may be a scanned PDF or photograph, and may contain handwritten signatures, names, addresses, and ticked boxes.
+export const TR1_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    extractions: {
+      type: "ARRAY",
+      description:
+        "One entry per TR1 form detected in the input. Empty array if no TR1 is present.",
+      items: SINGLE_TR1_SCHEMA,
+    },
+  },
+  required: ["extractions"],
+};
+
+export const TR1_PROMPT = `You are extracting structured data from a UK Land Registry document. The input file may contain ONE OR MORE Form TR1 (Transfer of Whole of Registered Title(s)) documents concatenated together. It may be a scanned PDF or photograph and may contain handwritten signatures, names, addresses, and ticked boxes.
+
+Return JSON of the form { "extractions": [ <one object per TR1> ] }. If multiple TR1s appear in the same file (typical for bulk uploads where each TR1 is 4–6 pages), emit one extraction object per form, in the order they appear. If no TR1 is present at all, return { "extractions": [] }.
 
 For EVERY field listed below, return an object with these keys:
 - field_name: the exact field key (e.g. "title_number")
@@ -189,6 +228,8 @@ Rules:
 2. Never invent values. Prefer null + low confidence over a guess.
 3. For the boolean trust-declaration fields (joint_tenants / tenants_in_common / other), set value to "Yes" only if the box is clearly ticked; null otherwise.
 4. For signatures, transcribe the closest readable rendering you can in value; raise is_handwritten=true and lower confidence_score accordingly.
-5. The comments field is for the EXTRACTOR's notes about the document overall (e.g. "Document is page 2 of 3, panel 11 cut off"), not the form's own text.
+5. The comments field is for the EXTRACTOR's notes about THIS specific TR1 (e.g. "TR1 #2 of 3 in the file", "panel 11 cut off"). When the file contains multiple TR1s, identify which one this is (e.g. "Form 1 of N, pages X–Y").
+6. source_page is the 1-indexed page number within the WHOLE FILE (not within an individual TR1). So if TR1 #2 starts on page 6, its title_number.source_page is 6.
+7. Use EXACTLY these keys on each field object — never abbreviate or typo them. Specifically the value key is spelled "value" (not "vaue", not "val").
 
 Return ONLY the JSON object matching the schema. No prose, no markdown, no preamble.`;

@@ -9,11 +9,16 @@ import { db } from "../db/client.ts";
 import { documents, type DocumentStatus } from "../db/schema.ts";
 import type { Env, ExtractWorkflowParams } from "../env.ts";
 import { extractTR1, GEMINI_MODEL } from "../lib/gemini.ts";
-import { REVIEW_RULES_VERSION, enrichTR1 } from "../lib/review-rules.ts";
+import {
+  REVIEW_RULES_VERSION,
+  countReviewFields,
+  enrichTR1List,
+} from "../lib/review-rules.ts";
 import { sendDocument, sendMessage } from "../lib/telegram.ts";
 import {
   PROMPT_VERSION,
   type TR1Enriched,
+  type TR1EnrichedList,
   type TR1Extracted,
 } from "../lib/tr1-schema.ts";
 
@@ -92,13 +97,14 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
           geminiModel: result.model,
           promptVersion: result.promptVersion,
           tokenUsage: result.usage as unknown as object,
+          extractionCount: result.extractions.length,
         })
         .where(eq(documents.id, documentId));
 
       return { ok: true as const };
     });
 
-    const enriched: TR1Enriched = await step.do(
+    const enrichedList: TR1EnrichedList = await step.do(
       "persist",
       LIGHT_STEP,
       async () => {
@@ -114,20 +120,24 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
         if (!text) {
           throw new Error("raw_gemini_response missing candidate text on persist replay");
         }
-        const parsed = JSON.parse(text) as TR1Extracted;
-        const enrichedLocal = enrichTR1(parsed);
+        const parsed = JSON.parse(text) as { extractions: TR1Extracted[] };
+        const enriched = enrichTR1List(parsed.extractions);
+        const payload: TR1EnrichedList = {
+          extraction_count: enriched.length,
+          extractions: enriched,
+        };
 
         await d
           .update(documents)
           .set({
-            extractedData: enrichedLocal as unknown as object,
+            extractedData: payload as unknown as object,
             reviewRulesVersion: REVIEW_RULES_VERSION,
             status: "completed" satisfies DocumentStatus,
             completedAt: now(),
           })
           .where(eq(documents.id, documentId));
 
-        return enrichedLocal;
+        return payload;
       },
     );
 
@@ -145,7 +155,7 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
       if (!flags.summarySentAt) {
         await sendMessage(this.env, {
           chatId: loaded.chatId,
-          text: renderSummary(enriched),
+          text: renderSummary(enrichedList),
           replyToMessageId: loaded.messageId,
         });
         await d
@@ -156,7 +166,7 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
 
       if (!flags.fileSentAt) {
         const jsonBytes = new TextEncoder().encode(
-          JSON.stringify(enriched, null, 2),
+          JSON.stringify(enrichedList, null, 2),
         );
         const baseName = (loaded.fileName ?? "tr1").replace(/\.[^.]+$/, "");
         await sendDocument(this.env, {
@@ -175,33 +185,62 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
   }
 }
 
-function renderSummary(enriched: TR1Enriched): string {
-  const title = enriched.title_number.value ?? "<i>unknown</i>";
-  const property = enriched.property.value ?? "<i>unknown</i>";
-  const date = enriched.date.value ?? "<i>unknown</i>";
+function renderSummary(list: TR1EnrichedList): string {
+  const n = list.extraction_count;
+  const totalReview = list.extractions.reduce(
+    (acc, e) => acc + countReviewFields(e),
+    0,
+  );
+
+  const header = n === 1
+    ? "✅ <b>Extraction complete</b>"
+    : `✅ <b>Extraction complete — ${n} TR1 forms found</b>`;
+
+  const blocks = list.extractions.map((e, i) =>
+    renderOneTr1(e, n > 1 ? i + 1 : null, n),
+  );
+
+  const footer = [
+    `<b>Prompt:</b> ${PROMPT_VERSION} · <b>Model:</b> ${GEMINI_MODEL} · <b>Rules:</b> ${REVIEW_RULES_VERSION}`,
+    totalReview > 0
+      ? `⚠️ ${totalReview} field(s) flagged for review across all forms`
+      : "✅ all fields confident",
+    "",
+    "Full JSON attached below.",
+  ].join("\n");
+
+  return [header, "", ...blocks, footer].join("\n");
+}
+
+function renderOneTr1(
+  e: TR1Enriched,
+  ordinal: number | null,
+  totalCount: number,
+): string {
+  const title = e.title_number.value ?? "<i>unknown</i>";
+  const property = e.property.value ?? "<i>unknown</i>";
+  const date = e.date.value ?? "<i>unknown</i>";
   const consideration =
-    enriched.consideration_money.value ??
-    enriched.consideration_other.value ??
-    "<i>none</i>";
+    e.consideration_money.value ?? e.consideration_other.value ?? "<i>none</i>";
+  const reviewCount = countReviewFields(e);
 
-  const reviewCount = Object.values(enriched).filter(
-    (f) => f.requires_human_review,
-  ).length;
+  const heading = ordinal
+    ? `<b>TR1 ${ordinal} of ${totalCount}</b>`
+    : "<b>TR1 details</b>";
 
-  const flag = reviewCount > 0 ? `⚠️ ${reviewCount} field(s) flagged for review` : "✅ all fields confident";
+  const reviewLine =
+    reviewCount > 0
+      ? `⚠️ ${reviewCount} field(s) need review`
+      : "✅ all fields confident";
 
   return [
-    "✅ <b>Extraction complete</b>",
-    "",
+    heading,
     `<b>Title:</b> ${escapeHtml(title)}`,
     `<b>Property:</b> ${escapeHtml(property)}`,
     `<b>Date:</b> ${escapeHtml(date)}`,
     `<b>Consideration:</b> ${escapeHtml(consideration)}`,
+    reviewLine,
     "",
-    `<b>Prompt:</b> ${PROMPT_VERSION} · <b>Model:</b> ${GEMINI_MODEL} · <b>Rules:</b> ${REVIEW_RULES_VERSION}`,
-    flag,
-    "",
-    "Full JSON attached below.",
   ].join("\n");
 }
 
