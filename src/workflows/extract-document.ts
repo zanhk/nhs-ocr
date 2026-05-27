@@ -17,10 +17,16 @@ import {
 import { sendDocument, sendMessage } from "../lib/telegram.ts";
 import {
   PROMPT_VERSION,
+  TR1_FIELD_NAMES,
   type TR1Enriched,
   type TR1EnrichedList,
   type TR1Extracted,
+  type TR1FieldEnriched,
+  type TR1FieldName,
 } from "../lib/tr1-schema.ts";
+
+const TELEGRAM_MESSAGE_BUDGET = 3800;
+const FIELD_VALUE_TRUNCATE = 100;
 
 const HEAVY_STEP: WorkflowStepConfig = {
   retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
@@ -186,6 +192,16 @@ export class ExtractDocumentWorkflow extends WorkflowEntrypoint<
 }
 
 function renderSummary(list: TR1EnrichedList): string {
+  const full = buildSummary(list, "full");
+  if (full.length <= TELEGRAM_MESSAGE_BUDGET) return full;
+  // Many TR1s in one file — fall back to highlights so it fits in one Telegram message.
+  return buildSummary(list, "highlights");
+}
+
+function buildSummary(
+  list: TR1EnrichedList,
+  mode: "full" | "highlights",
+): string {
   const n = list.extraction_count;
   const totalReview = list.extractions.reduce(
     (acc, e) => acc + countReviewFields(e),
@@ -197,13 +213,22 @@ function renderSummary(list: TR1EnrichedList): string {
     : `✅ <b>Extraction complete — ${n} TR1 forms found</b>`;
 
   const blocks = list.extractions.map((e, i) =>
-    renderOneTr1(e, n > 1 ? i + 1 : null, n),
+    mode === "full"
+      ? renderOneTr1Full(e, n > 1 ? i + 1 : null, n)
+      : renderOneTr1Highlights(e, n > 1 ? i + 1 : null, n),
   );
 
+  const legend =
+    mode === "full"
+      ? "<i>⚠️ = needs human review · ✋ = handwritten</i>"
+      : `<i>showing highlights only because the file contains ${n} TR1s. Full per-field details are in the attached JSON.</i>`;
+
   const footer = [
+    legend,
+    "",
     `<b>Prompt:</b> ${PROMPT_VERSION} · <b>Model:</b> ${GEMINI_MODEL} · <b>Rules:</b> ${REVIEW_RULES_VERSION}`,
     totalReview > 0
-      ? `⚠️ ${totalReview} field(s) flagged for review across all forms`
+      ? `⚠️ ${totalReview} field(s) flagged for review${n > 1 ? " across all forms" : ""}`
       : "✅ all fields confident",
     "",
     "Full JSON attached below.",
@@ -212,36 +237,69 @@ function renderSummary(list: TR1EnrichedList): string {
   return [header, "", ...blocks, footer].join("\n");
 }
 
-function renderOneTr1(
+function renderOneTr1Full(
   e: TR1Enriched,
   ordinal: number | null,
   totalCount: number,
 ): string {
-  const title = e.title_number.value ?? "<i>unknown</i>";
-  const property = e.property.value ?? "<i>unknown</i>";
-  const date = e.date.value ?? "<i>unknown</i>";
-  const consideration =
-    e.consideration_money.value ?? e.consideration_other.value ?? "<i>none</i>";
-  const reviewCount = countReviewFields(e);
-
   const heading = ordinal
-    ? `<b>TR1 ${ordinal} of ${totalCount}</b>`
-    : "<b>TR1 details</b>";
-
+    ? `📄 <b>TR1 ${ordinal} of ${totalCount}</b>`
+    : "📄 <b>TR1</b>";
+  const reviewCount = countReviewFields(e);
   const reviewLine =
     reviewCount > 0
       ? `⚠️ ${reviewCount} field(s) need review`
       : "✅ all fields confident";
 
+  const lines = TR1_FIELD_NAMES.map((name) => renderField(name, e[name]));
+
+  return [heading, ...lines, reviewLine, ""].join("\n");
+}
+
+function renderOneTr1Highlights(
+  e: TR1Enriched,
+  ordinal: number | null,
+  totalCount: number,
+): string {
+  const heading = ordinal
+    ? `📄 <b>TR1 ${ordinal} of ${totalCount}</b>`
+    : "📄 <b>TR1</b>";
+  const reviewCount = countReviewFields(e);
+  const reviewLine =
+    reviewCount > 0
+      ? `⚠️ ${reviewCount} field(s) need review`
+      : "✅ all fields confident";
+
+  const highlights: TR1FieldName[] = [
+    "title_number",
+    "property",
+    "date",
+    "consideration_money",
+  ];
+
   return [
     heading,
-    `<b>Title:</b> ${escapeHtml(title)}`,
-    `<b>Property:</b> ${escapeHtml(property)}`,
-    `<b>Date:</b> ${escapeHtml(date)}`,
-    `<b>Consideration:</b> ${escapeHtml(consideration)}`,
+    ...highlights.map((name) => renderField(name, e[name])),
     reviewLine,
     "",
   ].join("\n");
+}
+
+function renderField(name: TR1FieldName, f: TR1FieldEnriched): string {
+  const raw = f.value;
+  const display = raw === null
+    ? "<i>—</i>"
+    : escapeHtml(truncate(raw, FIELD_VALUE_TRUNCATE));
+  const markers: string[] = [];
+  if (f.requires_human_review) markers.push("⚠️");
+  if (f.is_handwritten) markers.push("✋");
+  const suffix = markers.length > 0 ? " " + markers.join("") : "";
+  return `• <b>${name}:</b> ${display}${suffix}`;
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
 }
 
 function escapeHtml(s: string): string {
